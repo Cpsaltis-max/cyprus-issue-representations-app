@@ -2,5 +2,6 @@ streamlit
 pandas
 pyreadstat
 scikit-learn
+plotly
 google-genai
 supabase
