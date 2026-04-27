@@ -1,7 +1,5 @@
 streamlit
-supabase
 pandas
-numpy
 pyreadstat
-scikit-learn
-plotly
+google-genai
+supabase
