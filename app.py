@@ -18,6 +18,12 @@ st.set_page_config(page_title="Cyprus Issue Observatory", layout="wide")
 # ============================================================
 GSP_LOGO = Path("gsp_logo.png")
 UCFS_LOGO = Path("ucfs_logo.png")
+HISTORICAL_DATA_CANDIDATES = [
+    Path("data/historical_responses.sav"),
+    Path("data/historical_responses.csv"),
+    Path("historical_responses.sav"),
+    Path("historical_responses.csv"),
+]
 
 def show_logo_header():
     """Show GSP and UCFS logos if the PNG files are present in the app folder."""
@@ -32,9 +38,31 @@ def show_logo_header():
             st.image(str(UCFS_LOGO), use_container_width=True)
     st.markdown("<div style='height: 0.6rem;'></div>", unsafe_allow_html=True)
 
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+def get_supabase_client():
+    try:
+        supabase_url = str(st.secrets["SUPABASE_URL"]).strip().rstrip("/")
+        supabase_key = str(st.secrets["SUPABASE_KEY"]).strip()
+    except KeyError:
+        st.error(
+            "Supabase is not configured. Add SUPABASE_URL and SUPABASE_KEY "
+            "to the app secrets in Streamlit Cloud."
+        )
+        st.stop()
+
+    if not supabase_url.startswith(("https://", "http://")):
+        st.error(
+            "SUPABASE_URL must be the Supabase project API URL, for example "
+            "https://your-project-ref.supabase.co."
+        )
+        st.stop()
+
+    if not supabase_key:
+        st.error("SUPABASE_KEY is empty. Add your Supabase anon key to Streamlit secrets.")
+        st.stop()
+
+    return create_client(supabase_url, supabase_key)
+
+supabase = get_supabase_client()
 
 TOTAL_PAGES = 12
 
@@ -1145,7 +1173,15 @@ with tab_survey:
                 # The Analysis tab uses this to project the respondent into the historical representational space.
                 st.session_state["latest_respondent"] = st.session_state.data.copy()
 
-                response = supabase.table("responses_raw").insert(st.session_state.data).execute()
+                try:
+                    response = supabase.table("responses_raw").insert(st.session_state.data).execute()
+                except Exception:
+                    st.error(
+                        "The response could not be saved because the app could not connect to Supabase. "
+                        "Check Streamlit Cloud secrets: SUPABASE_URL should be the project API URL "
+                        "(https://your-project-ref.supabase.co), and SUPABASE_KEY should be the anon key."
+                    )
+                    st.stop()
 
                 st.success(txt["success"])
                 st.write(txt["saved_response"])
@@ -1390,6 +1426,78 @@ def show_current_respondent_position(current_cluster, current_probability, curre
             st.dataframe(solution_df, use_container_width=True)
 
 
+def load_permanent_historical_data():
+    for path in HISTORICAL_DATA_CANDIDATES:
+        if not path.exists():
+            continue
+
+        if path.suffix.lower() == ".sav":
+            df, _ = pyreadstat.read_sav(path)
+            return df, path
+
+        if path.suffix.lower() == ".csv":
+            return pd.read_csv(path), path
+
+    return None, None
+
+
+def fetch_supabase_responses():
+    rows = []
+    page_size = 1000
+    start = 0
+
+    try:
+        while True:
+            response = (
+                supabase.table("responses_raw")
+                .select("*")
+                .range(start, start + page_size - 1)
+                .execute()
+            )
+            page = response.data or []
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
+    except Exception:
+        return pd.DataFrame()
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
+
+
+def infer_response_period(response):
+    for key in ["end_time", "start_time", "created_at", "inserted_at"]:
+        value = response.get(key)
+        if value is None or pd.isna(value):
+            continue
+
+        timestamp = pd.to_datetime(value, errors="coerce", utc=True)
+        if pd.notna(timestamp):
+            return int(timestamp.year)
+
+    return datetime.now(timezone.utc).year
+
+
+def build_new_response_analysis_rows(raw_responses, historical_df):
+    if raw_responses.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for response in raw_responses.to_dict(orient="records"):
+        current = build_current_scales(response, historical_df=historical_df)
+        if current.get("community") not in [1, 2]:
+            continue
+
+        current["period"] = infer_response_period(response)
+        current["source"] = "New questionnaire"
+        rows.append(current)
+
+    return pd.DataFrame(rows)
+
+
 with tab_analysis:
 
     show_logo_header()
@@ -1397,25 +1505,27 @@ with tab_analysis:
 
     st.markdown(
         """
-        Upload the historical SPSS dataset containing the 2007, 2010 and 2017 data.
-        Your SPSS file should include `GCs` and `Period` variables.
+        The representations analysis uses the permanent historical dataset bundled with this app
+        and enriches it with new questionnaire responses saved in Supabase.
 
-        Current convention:
-        - `GCs`: 1 = Greek Cypriots, 0 = Turkish Cypriots
-        - `Period`: survey wave / year
+        The bundled file should be named `data/historical_responses.sav` or
+        `data/historical_responses.csv`.
         """
     )
 
-    uploaded_file = st.file_uploader(
-        "Upload SPSS file (.sav)",
-        type=["sav"],
-        key="analysis_upload"
-    )
+    historical_df, historical_source = load_permanent_historical_data()
 
-    if uploaded_file is not None:
-        df, meta = pyreadstat.read_sav(uploaded_file)
+    if historical_df is None:
+        st.error(
+            "No permanent historical dataset was found. Add `data/historical_responses.sav` "
+            "or `data/historical_responses.csv` to the GitHub repository."
+        )
+        st.stop()
 
-        st.success("SPSS file loaded successfully.")
+    if historical_df is not None:
+        df = historical_df.copy()
+
+        st.success(f"Historical dataset loaded from `{historical_source}`.")
 
         with st.expander("Preview uploaded data", expanded=False):
             st.dataframe(df.head())
@@ -1547,6 +1657,14 @@ with tab_analysis:
         if len(constructed_scales) < 3:
             st.error("Too few scales were constructed. We need to map the exact SPSS variable names.")
             st.stop()
+
+        df["source"] = "Historical file"
+        new_response_rows = build_new_response_analysis_rows(fetch_supabase_responses(), historical_df=df)
+        if not new_response_rows.empty:
+            df = pd.concat([df, new_response_rows], ignore_index=True, sort=False)
+            st.success(f"Added {len(new_response_rows)} questionnaire response(s) from Supabase.")
+        else:
+            st.info("No saved questionnaire responses were available from Supabase yet.")
 
         st.success("Scale construction completed.")
 
