@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 import plotly.express as px
+from scipy.stats import chi2_contingency
 
 st.set_page_config(page_title="Cyprus Issue Observatory", layout="wide")
 
@@ -1498,6 +1499,185 @@ def build_new_response_analysis_rows(raw_responses, historical_df):
     return pd.DataFrame(rows)
 
 
+def find_first_existing_column(dataframe, candidates):
+    for candidate in candidates:
+        if candidate in dataframe.columns:
+            return candidate
+    return None
+
+
+def clean_categorical_for_chi_square(series):
+    cleaned = series.copy()
+    cleaned = cleaned.replace({77: np.nan, 88: np.nan, 99: np.nan})
+    cleaned = cleaned.dropna()
+    cleaned = cleaned.astype(str).str.strip()
+    cleaned = cleaned[~cleaned.str.lower().isin(["", "nan", "none", "dk", "nr", "dk/nr", "dk / nr"])]
+    return cleaned
+
+
+def recode_generation_for_chi_square(dataframe):
+    yearborn_col = find_first_existing_column(dataframe, ["yearborn", "Yearborn", "YearBorn", "Year born"])
+    age_col = find_first_existing_column(dataframe, ["Age", "age"])
+    period_col = find_first_existing_column(dataframe, ["period", "Period"])
+
+    if yearborn_col:
+        birth_year = pd.to_numeric(dataframe[yearborn_col], errors="coerce")
+    elif age_col and period_col:
+        birth_year = (
+            pd.to_numeric(dataframe[period_col], errors="coerce")
+            - pd.to_numeric(dataframe[age_col], errors="coerce")
+        )
+    else:
+        return pd.Series(index=dataframe.index, dtype="object")
+
+    generation = pd.cut(
+        birth_year,
+        bins=[0, 1945, 1964, 1980, 1996, 2100],
+        labels=[
+            "Born up to 1945",
+            "Born 1946-1964",
+            "Born 1965-1980",
+            "Born 1981-1996",
+            "Born 1997 or later",
+        ],
+        right=True,
+    )
+    return generation.astype("object")
+
+
+def chi_square_summary(table):
+    chi2, p_value, dof, expected = chi2_contingency(table)
+    total = table.to_numpy().sum()
+    min_dim = min(table.shape[0] - 1, table.shape[1] - 1)
+    cramers_v = (chi2 / (total * min_dim)) ** 0.5 if total and min_dim else 0.0
+    return {
+        "chi2": chi2,
+        "p_value": p_value,
+        "dof": dof,
+        "cramers_v": cramers_v,
+        "min_expected": float(np.min(expected)),
+    }
+
+
+def render_cluster_demographic_chi_square(source_df, clustered_df, community_label):
+    st.write("Cluster differences by demographic variables")
+    st.caption(
+        "Chi-square tests examine whether the distribution of model-derived clusters differs "
+        "across demographic categories. Generation is recoded from year of birth when available, "
+        "or estimated from period minus age."
+    )
+
+    demographic_sources = {
+        "Origin": find_first_existing_column(source_df, ["Origin"]),
+        "Period": find_first_existing_column(source_df, ["period", "Period"]),
+        "Generation": "Generation",
+        "Year born": find_first_existing_column(source_df, ["yearborn", "Yearborn", "YearBorn", "Year born"]),
+        "Male": find_first_existing_column(source_df, ["Male"]),
+        "Education": find_first_existing_column(source_df, ["Education"]),
+        "Urban": find_first_existing_column(source_df, ["Urban"]),
+        "IDP1_2": find_first_existing_column(source_df, ["IDP1_2"]),
+    }
+
+    demographic_frame = source_df.loc[clustered_df.index].copy()
+    demographic_frame["Generation"] = recode_generation_for_chi_square(demographic_frame)
+    demographic_frame["cluster"] = clustered_df["cluster"].astype(str)
+
+    available_demographics = {
+        label: column
+        for label, column in demographic_sources.items()
+        if column is not None and column in demographic_frame.columns
+    }
+
+    if not available_demographics:
+        st.info("No expected demographic variables were found for chi-square testing.")
+        return
+
+    selected_demographics = st.multiselect(
+        f"Demographic variables for chi-square tests - {community_label}",
+        list(available_demographics.keys()),
+        default=list(available_demographics.keys()),
+        key=f"chi_square_demographics_{community_label}",
+    )
+
+    if not selected_demographics:
+        st.info("Select at least one demographic variable to run chi-square tests.")
+        return
+
+    summary_rows = []
+    tables = {}
+    row_percentages = {}
+
+    for label in selected_demographics:
+        column = available_demographics[label]
+        analysis_data = pd.DataFrame(
+            {
+                "cluster": demographic_frame["cluster"],
+                "demographic": clean_categorical_for_chi_square(demographic_frame[column]),
+            }
+        ).dropna()
+
+        if analysis_data["cluster"].nunique() < 2 or analysis_data["demographic"].nunique() < 2:
+            continue
+
+        table = pd.crosstab(analysis_data["demographic"], analysis_data["cluster"])
+        result = chi_square_summary(table)
+
+        summary_rows.append(
+            {
+                "Variable": label,
+                "N": int(table.to_numpy().sum()),
+                "Chi-square": round(result["chi2"], 3),
+                "df": int(result["dof"]),
+                "p-value": round(result["p_value"], 4),
+                "Cramer's V": round(result["cramers_v"], 3),
+                "Minimum expected count": round(result["min_expected"], 2),
+            }
+        )
+        tables[label] = table
+        row_percentages[label] = (100 * table.div(table.sum(axis=1), axis=0)).round(1)
+
+    if not summary_rows:
+        st.info("The selected variables did not have enough valid categories for chi-square tests.")
+        return
+
+    summary_df = pd.DataFrame(summary_rows)
+    st.dataframe(summary_df, use_container_width=True)
+
+    if (summary_df["Minimum expected count"] < 5).any():
+        st.warning(
+            "At least one test has expected cell counts below 5. Interpret those chi-square results cautiously."
+        )
+
+    selected_detail = st.selectbox(
+        f"Show observed counts and row percentages - {community_label}",
+        list(tables.keys()),
+        key=f"chi_square_detail_{community_label}",
+    )
+
+    st.markdown("Observed counts")
+    st.dataframe(tables[selected_detail], use_container_width=True)
+
+    st.markdown("Row percentages")
+    st.dataframe(row_percentages[selected_detail], use_container_width=True)
+
+    plot_data = row_percentages[selected_detail].reset_index().melt(
+        id_vars=row_percentages[selected_detail].index.name or "demographic",
+        var_name="Cluster",
+        value_name="Percent",
+    )
+    plot_data = plot_data.rename(columns={plot_data.columns[0]: selected_detail})
+
+    fig_chi = px.bar(
+        plot_data,
+        x=selected_detail,
+        y="Percent",
+        color="Cluster",
+        barmode="group",
+        title=f"{selected_detail} by cluster - {community_label}",
+    )
+    st.plotly_chart(fig_chi, use_container_width=True)
+
+
 with tab_analysis:
 
     show_logo_header()
@@ -1767,6 +1947,11 @@ with tab_analysis:
                 cluster_sizes = community_df.groupby("cluster").size().reset_index(name="n")
                 cluster_sizes["percent"] = (100 * cluster_sizes["n"] / cluster_sizes["n"].sum()).round(1)
                 st.dataframe(cluster_sizes, use_container_width=True)
+
+                # ----------------------------------------------------
+                # Chi-square tests: clusters by demographic variables
+                # ----------------------------------------------------
+                render_cluster_demographic_chi_square(df, community_df, community_label)
 
                 # ----------------------------------------------------
                 # Cluster profiles
