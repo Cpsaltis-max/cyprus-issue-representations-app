@@ -215,7 +215,7 @@ T = {
         "live_together": "I feel that I can live together with {other}",
         "neighbors": "I would not mind having {other} as neighbors",
 
-        "thermo_stem": "The following question concerns your feelings toward {other} in general. Please rate this group of people on a scale from 0 to 10. The higher the score, the warmer or more positive you feel. The lower the score, the colder or more negative you feel. If you feel neither warm nor cold, choose 5.",
+        "thermo_stem": "The following question concerns your feelings toward {other} in general. Please rate this group of people on a scale from 0 to 100. The higher the score, the warmer or more positive you feel. The lower the score, the colder or more negative you feel. If you feel neither warm nor cold, choose 50.",
         "thermo_q": "How do you feel toward {other} in general?",
 
         "trust_stem": "Now we would like to ask some questions about {other} in general. Please indicate whether you agree or disagree with the following statements.",
@@ -360,7 +360,7 @@ T = {
         "live_together": "Αισθάνομαι ότι μπορώ να ζήσω μαζί με {other}",
         "neighbors": "Δεν θα με πείραζε να έχω {other} ως γείτονες",
 
-        "thermo_stem": "Η ακόλουθη ερώτηση αφορά τα συναισθήματά σας προς {other} γενικά. Παρακαλούμε βαθμολογήστε αυτή την ομάδα από 0 έως 10. Όσο μεγαλύτερη είναι η βαθμολογία, τόσο πιο θερμά ή θετικά αισθάνεστε. Όσο χαμηλότερη είναι η βαθμολογία, τόσο πιο ψυχρά ή αρνητικά αισθάνεστε. Αν δεν αισθάνεστε ούτε θερμά ούτε ψυχρά, επιλέξτε 5.",
+        "thermo_stem": "Η ακόλουθη ερώτηση αφορά τα συναισθήματά σας προς {other} γενικά. Παρακαλούμε βαθμολογήστε αυτή την ομάδα από 0 έως 100. Όσο μεγαλύτερη είναι η βαθμολογία, τόσο πιο θερμά ή θετικά αισθάνεστε. Όσο χαμηλότερη είναι η βαθμολογία, τόσο πιο ψυχρά ή αρνητικά αισθάνεστε. Αν δεν αισθάνεστε ούτε θερμά ούτε ψυχρά, επιλέξτε 50.",
         "thermo_q": "Πώς αισθάνεστε γενικά προς {other};",
 
         "trust_stem": "Τώρα θα θέλαμε να σας κάνουμε μερικές ερωτήσεις για {other} γενικά. Παρακαλούμε δηλώστε κατά πόσο συμφωνείτε ή διαφωνείτε με τις ακόλουθες δηλώσεις.",
@@ -505,7 +505,7 @@ T = {
         "live_together": "{other} ile birlikte yaşayabileceğimi hissediyorum",
         "neighbors": "{other} komşum olursa rahatsız olmam",
 
-        "thermo_stem": "Aşağıdaki soru genel olarak {other} hakkındaki duygularınızla ilgilidir. Lütfen bu grubu 0 ile 10 arasında değerlendiriniz. Daha yüksek puan daha sıcak veya olumlu hissettiğinizi gösterir. Daha düşük puan daha soğuk veya olumsuz hissettiğinizi gösterir. Ne sıcak ne soğuk hissediyorsanız 5'i seçiniz.",
+        "thermo_stem": "Aşağıdaki soru genel olarak {other} hakkındaki duygularınızla ilgilidir. Lütfen bu grubu 0 ile 100 arasında değerlendiriniz. Daha yüksek puan daha sıcak veya olumlu hissettiğinizi gösterir. Daha düşük puan daha soğuk veya olumsuz hissettiğinizi gösterir. Ne sıcak ne soğuk hissediyorsanız 50'yi seçiniz.",
         "thermo_q": "Genel olarak {other} hakkında nasıl hissediyorsunuz?",
 
         "trust_stem": "Şimdi genel olarak {other} hakkında bazı sorular sormak istiyoruz. Lütfen aşağıdaki ifadelere katılıp katılmadığınızı belirtiniz.",
@@ -982,11 +982,11 @@ with tab_survey:
         st.header(txt["p8"])
         st.markdown(txt["thermo_stem"].format(other=labels["other_plural"]))
 
-        s8_thermo_og_0_10 = st.slider(
+        s8_thermo_og_0_100 = st.slider(
             txt["thermo_q"].format(other=labels["other_plural"]),
             min_value=0,
-            max_value=10,
-            value=st.session_state.data.get("s8_thermo_og_0_10", 5),
+            max_value=100,
+            value=st.session_state.data.get("s8_thermo_og_0_10", 50),
             key="s8_thermo_widget"
         )
 
@@ -996,7 +996,7 @@ with tab_survey:
                 go_back()
         with col2:
             if st.button(txt["next"], key="next_8"):
-                save_value("s8_thermo_og_0_10", s8_thermo_og_0_10)
+                save_value("s8_thermo_og_0_10", s8_thermo_og_0_100)
                 go_next()
 
     # ============================================================
@@ -1244,15 +1244,15 @@ def build_current_scales(response, historical_df=None):
 
     thermo = _clean_current_value(response.get("s8_thermo_og_0_10"))
     if not pd.isna(thermo):
-        # The app asks the thermometer on a 0–10 scale. Historical files may code it as
-        # 0–100, 1–11, or 0–10. Harmonise the current respondent to the historical scale.
+        # The app now asks the thermometer on a 0-100 scale. Older test responses may
+        # still be 0-10, so only expand small values when the historical scale is 0-100.
         if historical_df is not None and "Thermometer" in historical_df.columns:
             hist_min = historical_df["Thermometer"].min(skipna=True)
             hist_max = historical_df["Thermometer"].max(skipna=True)
             if pd.notna(hist_min) and pd.notna(hist_max):
-                if hist_max > 20:
+                if hist_max > 20 and thermo <= 10:
                     thermo = thermo * 10
-                elif hist_min >= 1 and hist_max > 10:
+                elif hist_min >= 1 and hist_max > 10 and thermo <= 10:
                     thermo = thermo + 1
         current["Thermometer"] = float(thermo)
 
