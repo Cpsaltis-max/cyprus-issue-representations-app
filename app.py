@@ -1323,7 +1323,7 @@ def solution_orientation(row):
     return "Mixed / non-exclusive"
 
 
-def interpret_cluster_profiles(profile, community_label):
+def interpret_cluster_profiles(profile, community_label, demographic_context=None):
     """Create community-sensitive GSP labels and paragraph narratives from cluster means."""
     out = profile.copy()
     positive_candidates = ["Trust", "Contact_Quality", "Contact_Frequency", "Cohabitation", "Thermometer"]
@@ -1359,6 +1359,8 @@ def interpret_cluster_profiles(profile, community_label):
 
     is_tc = "Turkish" in community_label
     narratives = []
+    demographic_context = demographic_context or {}
+
     for cluster, row in out.iterrows():
         inter = row["intergroup_orientation"]
         sol = row["solution_orientation"]
@@ -1387,7 +1389,18 @@ def interpret_cluster_profiles(profile, community_label):
             sol_text = " Its solution profile keeps BBF within the range of acceptable compromise while resisting two-state separation."
         else:
             sol_text = " Its solution profile is mixed and should be interpreted cautiously rather than forced into a single ideological type."
-        narratives.append(base + sol_text)
+
+        demographic_notes = demographic_context.get(str(cluster), [])
+        if demographic_notes:
+            demo_text = (
+                " In the chi-square tests, this cluster is also "
+                + "; ".join(demographic_notes[:4])
+                + "."
+            )
+        else:
+            demo_text = ""
+
+        narratives.append(base + sol_text + demo_text)
 
     out["narrative"] = narratives
     return out
@@ -1433,13 +1446,13 @@ def load_permanent_historical_data():
             continue
 
         if path.suffix.lower() == ".sav":
-            df, _ = pyreadstat.read_sav(path)
-            return df, path
+            df, meta = pyreadstat.read_sav(path)
+            return df, path, getattr(meta, "variable_value_labels", {}) or {}
 
         if path.suffix.lower() == ".csv":
-            return pd.read_csv(path), path
+            return pd.read_csv(path), path, {}
 
-    return None, None
+    return None, None, {}
 
 
 def fetch_supabase_responses():
@@ -1510,9 +1523,52 @@ def clean_categorical_for_chi_square(series):
     cleaned = series.copy()
     cleaned = cleaned.replace({77: np.nan, 88: np.nan, 99: np.nan})
     cleaned = cleaned.dropna()
-    cleaned = cleaned.astype(str).str.strip()
-    cleaned = cleaned[~cleaned.str.lower().isin(["", "nan", "none", "dk", "nr", "dk/nr", "dk / nr"])]
+    cleaned = cleaned[~cleaned.astype(str).str.strip().str.lower().isin(["", "nan", "none", "dk", "nr", "dk/nr", "dk / nr"])]
     return cleaned
+
+
+def compact_category_value(value):
+    numeric_value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.notna(numeric_value) and float(numeric_value).is_integer():
+        return str(int(numeric_value))
+    return str(value).strip()
+
+
+def value_label_lookup(value_labels, column):
+    if not value_labels:
+        return {}
+
+    candidates = [column]
+    if column == "period":
+        candidates.append("Period")
+    elif column == "community":
+        candidates.append("GCs")
+
+    for candidate in candidates:
+        if candidate in value_labels:
+            return value_labels[candidate] or {}
+
+    return {}
+
+
+def labelled_category_series(series, label_map):
+    cleaned = clean_categorical_for_chi_square(series)
+
+    def label_one(value):
+        raw = compact_category_value(value)
+        labels_to_try = [
+            value,
+            pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0],
+            raw,
+        ]
+
+        for candidate in labels_to_try:
+            if candidate in label_map:
+                return f"{raw} = {label_map[candidate]}"
+
+        return raw
+
+    return cleaned.apply(label_one)
 
 
 def recode_generation_for_chi_square(dataframe):
@@ -1556,22 +1612,22 @@ def chi_square_summary(table):
         "dof": dof,
         "cramers_v": cramers_v,
         "min_expected": float(np.min(expected)),
+        "expected": expected,
     }
 
 
-def render_cluster_demographic_chi_square(source_df, clustered_df, community_label):
+def render_cluster_demographic_chi_square(source_df, clustered_df, community_label, value_labels=None):
     st.write("Cluster differences by demographic variables")
     st.caption(
         "Chi-square tests examine whether the distribution of model-derived clusters differs "
         "across demographic categories. Generation is recoded from year of birth when available, "
-        "or estimated from period minus age."
+        "or estimated from period minus age. Raw year of birth is not tested because it has too many categories."
     )
 
     demographic_sources = {
         "Origin": find_first_existing_column(source_df, ["Origin"]),
         "Period": find_first_existing_column(source_df, ["period", "Period"]),
         "Generation": "Generation",
-        "Year born": find_first_existing_column(source_df, ["yearborn", "Yearborn", "YearBorn", "Year born"]),
         "Male": find_first_existing_column(source_df, ["Male"]),
         "Education": find_first_existing_column(source_df, ["Education"]),
         "Urban": find_first_existing_column(source_df, ["Urban"]),
@@ -1590,7 +1646,7 @@ def render_cluster_demographic_chi_square(source_df, clustered_df, community_lab
 
     if not available_demographics:
         st.info("No expected demographic variables were found for chi-square testing.")
-        return
+        return {}
 
     selected_demographics = st.multiselect(
         f"Demographic variables for chi-square tests - {community_label}",
@@ -1601,18 +1657,20 @@ def render_cluster_demographic_chi_square(source_df, clustered_df, community_lab
 
     if not selected_demographics:
         st.info("Select at least one demographic variable to run chi-square tests.")
-        return
+        return {}
 
     summary_rows = []
     tables = {}
     row_percentages = {}
+    demographic_context = {}
 
     for label in selected_demographics:
         column = available_demographics[label]
+        label_map = value_label_lookup(value_labels, column)
         analysis_data = pd.DataFrame(
             {
                 "cluster": demographic_frame["cluster"],
-                "demographic": clean_categorical_for_chi_square(demographic_frame[column]),
+                "demographic": labelled_category_series(demographic_frame[column], label_map),
             }
         ).dropna()
 
@@ -1636,9 +1694,26 @@ def render_cluster_demographic_chi_square(source_df, clustered_df, community_lab
         tables[label] = table
         row_percentages[label] = (100 * table.div(table.sum(axis=1), axis=0)).round(1)
 
+        if result["p_value"] < 0.05:
+            observed = table.to_numpy()
+            expected = result["expected"]
+            residuals = (observed - expected) / np.sqrt(expected)
+
+            for row_index, category in enumerate(table.index):
+                for col_index, cluster in enumerate(table.columns):
+                    residual = residuals[row_index, col_index]
+                    if residual >= 1.96:
+                        demographic_context.setdefault(str(cluster), []).append(
+                            f"over-represented among {label}: {category}"
+                        )
+                    elif residual <= -1.96:
+                        demographic_context.setdefault(str(cluster), []).append(
+                            f"under-represented among {label}: {category}"
+                        )
+
     if not summary_rows:
         st.info("The selected variables did not have enough valid categories for chi-square tests.")
-        return
+        return {}
 
     summary_df = pd.DataFrame(summary_rows)
     st.dataframe(summary_df, use_container_width=True)
@@ -1648,34 +1723,31 @@ def render_cluster_demographic_chi_square(source_df, clustered_df, community_lab
             "At least one test has expected cell counts below 5. Interpret those chi-square results cautiously."
         )
 
-    selected_detail = st.selectbox(
-        f"Show observed counts and row percentages - {community_label}",
-        list(tables.keys()),
-        key=f"chi_square_detail_{community_label}",
-    )
+    for label in tables:
+        st.markdown(f"**{label}: observed counts**")
+        st.dataframe(tables[label], use_container_width=True)
 
-    st.markdown("Observed counts")
-    st.dataframe(tables[selected_detail], use_container_width=True)
+        st.markdown(f"**{label}: row percentages**")
+        st.dataframe(row_percentages[label], use_container_width=True)
 
-    st.markdown("Row percentages")
-    st.dataframe(row_percentages[selected_detail], use_container_width=True)
+        plot_data = row_percentages[label].reset_index().melt(
+            id_vars=row_percentages[label].index.name or "demographic",
+            var_name="Cluster",
+            value_name="Percent",
+        )
+        plot_data = plot_data.rename(columns={plot_data.columns[0]: label})
 
-    plot_data = row_percentages[selected_detail].reset_index().melt(
-        id_vars=row_percentages[selected_detail].index.name or "demographic",
-        var_name="Cluster",
-        value_name="Percent",
-    )
-    plot_data = plot_data.rename(columns={plot_data.columns[0]: selected_detail})
+        fig_chi = px.bar(
+            plot_data,
+            x=label,
+            y="Percent",
+            color="Cluster",
+            barmode="group",
+            title=f"{label} by cluster - {community_label}",
+        )
+        st.plotly_chart(fig_chi, use_container_width=True)
 
-    fig_chi = px.bar(
-        plot_data,
-        x=selected_detail,
-        y="Percent",
-        color="Cluster",
-        barmode="group",
-        title=f"{selected_detail} by cluster - {community_label}",
-    )
-    st.plotly_chart(fig_chi, use_container_width=True)
+    return demographic_context
 
 
 with tab_analysis:
@@ -1693,7 +1765,7 @@ with tab_analysis:
         """
     )
 
-    historical_df, historical_source = load_permanent_historical_data()
+    historical_df, historical_source, historical_value_labels = load_permanent_historical_data()
 
     if historical_df is None:
         st.error(
@@ -1951,7 +2023,12 @@ with tab_analysis:
                 # ----------------------------------------------------
                 # Chi-square tests: clusters by demographic variables
                 # ----------------------------------------------------
-                render_cluster_demographic_chi_square(df, community_df, community_label)
+                demographic_context = render_cluster_demographic_chi_square(
+                    df,
+                    community_df,
+                    community_label,
+                    historical_value_labels,
+                )
 
                 # ----------------------------------------------------
                 # Cluster profiles
@@ -1961,7 +2038,11 @@ with tab_analysis:
                 profile = community_df.groupby("cluster")[features].mean().round(3)
                 st.dataframe(profile, use_container_width=True)
 
-                interpreted_profile = interpret_cluster_profiles(profile, community_label)
+                interpreted_profile = interpret_cluster_profiles(
+                    profile,
+                    community_label,
+                    demographic_context=demographic_context,
+                )
                 st.write("Cluster interpretation: GSP-based suggested labels")
                 st.caption(
                     "These are cautious, rule-based interpretive labels derived from the cluster mean profiles. "
