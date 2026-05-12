@@ -1,4 +1,4 @@
-import streamlit as st
+-import streamlit as st
 from supabase import create_client
 from pathlib import Path
 from datetime import datetime, timezone
@@ -64,6 +64,7 @@ def get_supabase_client():
     return create_client(supabase_url, supabase_key)
 
 supabase = get_supabase_client()
+APP_VERSION = "2026-05-12-json-response-storage"
 
 TOTAL_PAGES = 12
 
@@ -554,6 +555,14 @@ def go_back():
 
 def save_value(key, value):
     st.session_state.data[key] = value
+
+
+def build_supabase_response_payload(response_data):
+    return {
+        "app_version": APP_VERSION,
+        "language": response_data.get("language"),
+        "response_data": response_data,
+    }
 
 def get_labels():
     community = st.session_state.data.get("community")
@@ -1174,14 +1183,16 @@ with tab_survey:
                 # The Analysis tab uses this to project the respondent into the historical representational space.
                 st.session_state["latest_respondent"] = st.session_state.data.copy()
 
+                supabase_payload = build_supabase_response_payload(st.session_state.data)
+
                 try:
-                    response = supabase.table("responses_raw").insert(st.session_state.data).execute()
-                except Exception:
+                    response = supabase.table("responses_raw").insert(supabase_payload).execute()
+                except Exception as exc:
                     st.error(
-                        "The response could not be saved because the app could not connect to Supabase. "
-                        "Check Streamlit Cloud secrets: SUPABASE_URL should be the project API URL "
-                        "(https://your-project-ref.supabase.co), and SUPABASE_KEY should be the anon key."
+                        "The response could not be saved in Supabase. "
+                        "Please check the table schema, API permissions, and RLS insert policy."
                     )
+                    st.exception(exc)
                     st.stop()
 
                 st.success(txt["success"])
@@ -1479,7 +1490,20 @@ def fetch_supabase_responses():
     if not rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if "response_data" in out.columns:
+        expanded = pd.json_normalize(out["response_data"].dropna())
+        metadata_cols = [
+            col
+            for col in out.columns
+            if col not in expanded.columns and col != "response_data"
+        ]
+        out = pd.concat(
+            [out[metadata_cols].reset_index(drop=True), expanded.reset_index(drop=True)],
+            axis=1,
+        )
+
+    return out
 
 
 def infer_response_period(response):
